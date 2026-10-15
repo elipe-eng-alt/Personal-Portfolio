@@ -248,8 +248,9 @@ def send_project_notification(settings, notification):
             "https://api.resend.com/emails",
             data=payload,
             headers={
-                "Authorization": f"Bearer {settings.api_key}",
+               "Authorization": f"Bearer {settings.api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "portfolio-app/1.0",
             },
             method="POST",
         )
