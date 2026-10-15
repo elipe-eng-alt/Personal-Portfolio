@@ -1,13 +1,20 @@
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
+import os
 import re
 import secrets
+import smtplib
+import ssl
 import sqlite3
+import threading
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,7 +27,11 @@ COOKIE_NAME = "portfolio_session"
 SESSION_LIFETIME = 7 * 24 * 60 * 60
 PASSWORD_ITERATIONS = 600_000
 MAX_BODY_SIZE = 16_384
+MAX_PROJECT_REQUESTS_PER_HOUR = 5
+MAIL_RETRY_INTERVAL = 30
+MAIL_MAX_RETRY_DELAY = 3_600
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+OWNER_EMAIL = "felipegabrieloliveira1000@gmail.com"
 MONTHS_PT = (
     "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
     "Jul", "Ago", "Set", "Out", "Nov", "Dez",
@@ -66,6 +77,204 @@ DEFAULT_SERVICES = (
         "Personalizado",
     ),
 )
+
+
+class EmailNotConfiguredError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class SMTPSettings:
+    host: str
+    port: int
+    username: str
+    password: str
+    recipient: str
+
+    @classmethod
+    def from_environment(cls):
+        username = os.environ.get("SMTP_USER", "").strip()
+        password = os.environ.get("SMTP_PASSWORD", "")
+        if not username and not password:
+            return None
+        if not username or not password:
+            raise ValueError("Configure SMTP_USER e SMTP_PASSWORD juntos.")
+
+        recipient = os.environ.get("SMTP_TO", OWNER_EMAIL).strip()
+        host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+        try:
+            port = int(os.environ.get("SMTP_PORT", "587"))
+        except ValueError as error:
+            raise ValueError("SMTP_PORT precisa ser um número.") from error
+
+        if not EMAIL_PATTERN.fullmatch(username) or not EMAIL_PATTERN.fullmatch(recipient):
+            raise ValueError("SMTP_USER e SMTP_TO precisam ser endereços de e-mail válidos.")
+        if not host or len(host) > 253 or any(character.isspace() for character in host):
+            raise ValueError("SMTP_HOST é inválido.")
+        if not 1 <= port <= 65_535:
+            raise ValueError("SMTP_PORT deve estar entre 1 e 65535.")
+
+        return cls(host, port, username, password, recipient)
+
+
+def load_environment_file(environment_path=ROOT / ".env"):
+    try:
+        contents = Path(environment_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+
+    for line_number, raw_line in enumerate(contents.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            raise ValueError(f"Configuração inválida no arquivo .env, linha {line_number}.")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def send_project_notification(settings, notification):
+    if settings is None:
+        raise EmailNotConfiguredError(
+            "Configure SMTP_USER e SMTP_PASSWORD para enviar notificações."
+        )
+
+    message = EmailMessage()
+    message["From"] = settings.username
+    message["To"] = settings.recipient
+    message["Reply-To"] = notification["customer_email"]
+    message["Subject"] = (
+        f"Nova solicitação de projeto #{notification['contract_id']}: "
+        f"{notification['service_title']}"
+    )
+    message.set_content(
+        "Você recebeu uma nova solicitação pelo portfólio.\n\n"
+        f"Cliente: {notification['customer_email']}\n"
+        f"Serviço: {notification['service_title']}\n"
+        f"Data: {notification['created_at']}\n"
+        f"Solicitação #{notification['contract_id']}\n\n"
+        "O que o cliente escreveu:\n"
+        f"{notification['description'] or '(Nenhum detalhe adicional enviado.)'}\n"
+    )
+
+    with smtplib.SMTP(settings.host, settings.port, timeout=15) as client:
+        client.ehlo()
+        client.starttls(context=ssl.create_default_context())
+        client.ehlo()
+        client.login(settings.username, settings.password)
+        client.send_message(message)
+
+
+def deliver_pending_notifications(server, contract_id=None):
+    with server.notification_lock:
+        now = int(time.time())
+        query = """
+            SELECT outbox.contract_id, outbox.attempts,
+                contracts.service_title, contracts.description, contracts.created_at,
+                users.email AS customer_email
+            FROM email_outbox AS outbox
+            JOIN contracts ON contracts.id = outbox.contract_id
+            JOIN users ON users.id = contracts.user_id
+            WHERE outbox.status = 'pending'
+                AND outbox.next_attempt_at <= ?
+        """
+        parameters = [now]
+        if contract_id is not None:
+            query += " AND outbox.contract_id = ?"
+            parameters.append(contract_id)
+        query += " ORDER BY outbox.contract_id LIMIT 10"
+
+        with closing(connect_database(server.database_path)) as connection:
+            notifications = connection.execute(query, parameters).fetchall()
+
+        for row in notifications:
+            notification = dict(row)
+            try:
+                server.email_sender(server.smtp_settings, notification)
+            except (
+                EmailNotConfiguredError,
+                OSError,
+                smtplib.SMTPException,
+                ValueError,
+            ) as error:
+                attempts = notification["attempts"] + 1
+                retry_delay = min(60 * (2 ** min(attempts - 1, 10)), MAIL_MAX_RETRY_DELAY)
+                with closing(connect_database(server.database_path)) as connection:
+                    with connection:
+                        connection.execute(
+                            """
+                            UPDATE email_outbox
+                            SET attempts = ?, next_attempt_at = ?, last_error = ?
+                            WHERE contract_id = ? AND status = 'pending'
+                            """,
+                            (
+                                attempts,
+                                now + retry_delay,
+                                type(error).__name__,
+                                notification["contract_id"],
+                            ),
+                        )
+                logging.error(
+                    "E-mail da solicitação #%s não enviado (%s); nova tentativa em %s s.",
+                    notification["contract_id"],
+                    type(error).__name__,
+                    retry_delay,
+                )
+            else:
+                with closing(connect_database(server.database_path)) as connection:
+                    with connection:
+                        connection.execute(
+                            """
+                            UPDATE email_outbox
+                            SET status = 'sent', attempts = attempts + 1,
+                                sent_at = ?, last_error = NULL
+                            WHERE contract_id = ? AND status = 'pending'
+                            """,
+                            (
+                                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                notification["contract_id"],
+                            ),
+                        )
+
+        if contract_id is None:
+            return
+        with closing(connect_database(server.database_path)) as connection:
+            result = connection.execute(
+                "SELECT status FROM email_outbox WHERE contract_id = ?",
+                (contract_id,),
+            ).fetchone()
+        return result["status"] if result is not None else None
+
+
+def run_email_worker(server):
+    while not server.email_worker_stop.is_set():
+        server.email_worker_wakeup.wait(timeout=MAIL_RETRY_INTERVAL)
+        server.email_worker_wakeup.clear()
+        try:
+            deliver_pending_notifications(server)
+        except sqlite3.Error:
+            logging.exception("Não foi possível consultar a fila de e-mails.")
+
+
+def parse_public_origin(value):
+    origin = urlsplit(value)
+    if (
+        origin.scheme not in ("http", "https")
+        or not origin.netloc
+        or origin.username
+        or origin.password
+        or origin.path not in ("", "/")
+        or origin.query
+        or origin.fragment
+    ):
+        raise ValueError("APP_ORIGIN precisa conter apenas a origem, por exemplo https://site.com.")
+    return origin.scheme, origin.netloc.casefold()
 
 
 def connect_database(database_path):
@@ -125,6 +334,17 @@ def initialize_database(database_path=DATABASE_PATH):
                 status TEXT NOT NULL DEFAULT 'Aguardando início',
                 position INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS email_outbox (
+                contract_id INTEGER PRIMARY KEY REFERENCES contracts(id)
+                    ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sent')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                sent_at TEXT,
+                last_error TEXT
+            );
             """
         )
         connection.executemany(
@@ -180,6 +400,13 @@ class PortfolioHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, request_handler, database_path=DATABASE_PATH):
         self.database_path = Path(database_path)
+        self.smtp_settings = SMTPSettings.from_environment()
+        configured_origin = os.environ.get("APP_ORIGIN", "").strip()
+        self.public_origin = parse_public_origin(configured_origin) if configured_origin else None
+        self.email_sender = send_project_notification
+        self.notification_lock = threading.Lock()
+        self.email_worker_wakeup = threading.Event()
+        self.email_worker_stop = threading.Event()
         super().__init__(server_address, request_handler)
 
 
@@ -222,6 +449,31 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
 
     def send_error_json(self, status, message):
         self.send_json(status, {"error": message})
+
+    def has_valid_request_origin(self):
+        origin_header = self.headers.get("Origin")
+        request_host = self.headers.get("Host", "").casefold()
+        if not origin_header or not request_host:
+            return False
+        try:
+            origin = urlsplit(origin_header)
+            if (
+                origin.scheme not in ("http", "https")
+                or not origin.netloc
+                or origin.username
+                or origin.password
+                or origin.path not in ("", "/")
+                or origin.query
+                or origin.fragment
+            ):
+                return False
+            request_origin = (origin.scheme, origin.netloc.casefold())
+        except ValueError:
+            return False
+
+        if self.server.public_origin is not None:
+            return request_origin == self.server.public_origin
+        return origin.scheme == "http" and origin.netloc.casefold() == request_host
 
     def send_static_file(self, file_path):
         try:
@@ -295,10 +547,27 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
             ).fetchone()
 
     def set_session_cookie(self, token):
+        secure_attribute = (
+            "; Secure"
+            if self.server.public_origin and self.server.public_origin[0] == "https"
+            else ""
+        )
         return (
             "Set-Cookie",
             f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; "
-            f"Max-Age={SESSION_LIFETIME}",
+            f"Max-Age={SESSION_LIFETIME}{secure_attribute}",
+        )
+
+    def clear_session_cookie(self):
+        secure_attribute = (
+            "; Secure"
+            if self.server.public_origin and self.server.public_origin[0] == "https"
+            else ""
+        )
+        return (
+            "Set-Cookie",
+            f"{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+            f"{secure_attribute}",
         )
 
     def create_session(self, user_id):
@@ -461,6 +730,10 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
+        if not self.has_valid_request_origin():
+            self.send_error_json(403, "Origem da solicitação inválida.")
+            return
+
         path = urlsplit(self.path).path
         payload = self.read_json_body()
         if payload is None:
@@ -569,12 +842,7 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         self.send_json(
             200,
             {"ok": True},
-            (
-                (
-                    "Set-Cookie",
-                    f"{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
-                ),
-            ),
+            (self.clear_session_cookie(),),
         )
 
     def create_contract(self, payload):
@@ -593,8 +861,27 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
             return
 
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat(timespec="seconds")
         with closing(connect_database(self.server.database_path)) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                request_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM contracts
+                    WHERE user_id = ? AND created_at >= ?
+                    """,
+                    (user["id"], cutoff),
+                ).fetchone()["count"]
+                if request_count >= MAX_PROJECT_REQUESTS_PER_HOUR:
+                    self.send_error_json(
+                        429,
+                        "Você atingiu o limite de solicitações. Tente novamente mais tarde.",
+                    )
+                    return
+
                 service = connection.execute(
                     "SELECT title FROM services WHERE id = ?",
                     (service_id,),
@@ -623,13 +910,35 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
                         (contract_id, "Revisão e entrega", 3),
                     ),
                 )
+                connection.execute(
+                    "INSERT INTO email_outbox (contract_id) VALUES (?)",
+                    (contract_id,),
+                )
 
-        self.send_json(201, {"id": contract_id, "status": "Solicitado"})
+        email_status = deliver_pending_notifications(self.server, contract_id)
+        if email_status == "pending":
+            self.server.email_worker_wakeup.set()
+        self.send_json(
+            201,
+            {
+                "id": contract_id,
+                "status": "Solicitado",
+                "email_status": email_status,
+            },
+        )
 
 
 def main():
+    load_environment_file()
     initialize_database()
     server = PortfolioHTTPServer(("127.0.0.1", 8000), PortfolioRequestHandler)
+    email_worker = threading.Thread(
+        target=run_email_worker,
+        args=(server,),
+        name="email-notification-worker",
+        daemon=True,
+    )
+    email_worker.start()
     print("Portal iniciado em http://127.0.0.1:8000")
     print("Pressione Ctrl+C para encerrar.")
     try:
@@ -637,6 +946,9 @@ def main():
     except KeyboardInterrupt:
         print("\nEncerrando o portal...")
     finally:
+        server.email_worker_stop.set()
+        server.email_worker_wakeup.set()
+        email_worker.join(timeout=5)
         server.server_close()
 
 

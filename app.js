@@ -415,15 +415,19 @@ document.addEventListener("submit", async (event) => {
 		button.disabled = true;
 		message.textContent = "";
 		try {
-			await requestJson("/api/contracts", {
+			const result = await requestJson("/api/contracts", {
 				method: "POST",
 				body: JSON.stringify({
 					service_id: serviceForm.dataset.serviceId,
 					description: serviceForm.elements.description.value,
 				}),
 			});
-			setGlobalStatus("Solicitação enviada. Você pode acompanhar as etapas no painel de tarefas.");
 			await navigate("/tasks");
+			setGlobalStatus(
+				result.email_status === "sent"
+					? "Solicitação registrada e e-mail enviado. Você pode acompanhar o projeto nesta página."
+					: "Solicitação registrada. O e-mail está na fila de envio e será tentado novamente automaticamente.",
+			);
 		} catch (error) {
 			message.textContent = error.message;
 			if (error.status === 401) {
