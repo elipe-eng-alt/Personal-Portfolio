@@ -38,14 +38,14 @@ As rotas de escrita exigem uma origem válida. Um cliente autenticado pode envia
 
 No painel do Render, abra o serviço `personal-portfolio-0lg6`:
 
-1. Em **Environment**, configure `APP_ORIGIN=https://personal-portfolio-0lg6.onrender.com`, `DATABASE_PATH=/var/data/portfolio.sqlite3` e `RESEND_API_KEY`. Opcionalmente configure `EMAIL_FROM` após validar o domínio no Resend.
-2. Em **Disks**, adicione um disco persistente montado em `/var/data`. O Render não importa `.env.example`; defina as variáveis no painel.
+1. Em **Disks**, adicione primeiro um disco persistente com o Mount Path `/var/data`. O processo não tem permissão para criar esse caminho: o Render precisa montar o disco antes de iniciar o servidor.
+2. Em **Environment**, configure `APP_ORIGIN=https://personal-portfolio-0lg6.onrender.com`, `DATABASE_PATH=/var/data/portfolio.sqlite3` e `RESEND_API_KEY`. Opcionalmente configure `EMAIL_FROM` após validar o domínio no Resend. O Render não importa `.env.example`; defina as variáveis no painel.
 3. Em **Settings**, configure o Health Check Path como `/health`. O servidor usa automaticamente a porta fornecida pelo Render e escuta em `0.0.0.0`.
-4. Salve e faça o redeploy. Consulte `/api/health`: `database` deve ser `ok`, `email_provider` deve ser `configured` e `pending_emails` deve diminuir depois do envio.
+4. Salve, publique as alterações deste projeto e faça o redeploy. Consulte `/api/health`: `database` deve ser `ok`, `email_provider` deve ser `resend` (ou `smtp`) e `pending_emails` deve diminuir depois do envio.
 
 **Persistência:** o SQLite fica no disco ligado ao serviço. Sem um disco persistente, os arquivos do sistema de arquivos do serviço podem desaparecer em reinicializações ou novos deploys; com SQLite e disco, mantenha uma única instância da aplicação. Discos persistentes podem exigir um plano pago no Render; confira o preço no painel antes de ativar. Se seu plano não permitir disco, use um banco PostgreSQL gerenciado e migre o backend antes de publicar.
 
-Cadastros e solicitações que não foram gravados em um banco persistente antigo não podem ser recuperados por este ajuste. Depois de conectar o disco, os novos cadastros e pedidos serão gravados em `/var/data/portfolio.sqlite3` e sobreviverão aos deploys.
+Cadastros e solicitações que não foram gravados em um banco persistente antigo não podem ser recuperados por este ajuste. Se o serviço falhar ao iniciar por `PermissionError: /var/data`, o disco ainda não está montado no serviço. Depois de conectar o disco e publicar esta versão, os novos cadastros e pedidos serão gravados em `/var/data/portfolio.sqlite3` e sobreviverão aos deploys.
 
 ## Preparar HTTPS com Caddy
 

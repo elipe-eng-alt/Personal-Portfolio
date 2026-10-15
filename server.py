@@ -151,12 +151,44 @@ class SMTPSettings:
 def configured_database_path():
     configured_path = os.environ.get("DATABASE_PATH", "").strip()
     if not configured_path:
+        if is_render_environment():
+            return Path("/var/data/portfolio.sqlite3")
         return DEFAULT_DATABASE_PATH
 
     path = Path(configured_path).expanduser()
     if not path.is_absolute():
         path = ROOT / path
     return path.resolve()
+
+
+def is_render_environment():
+    return (
+        os.environ.get("RENDER", "").casefold() == "true"
+        or bool(os.environ.get("RENDER_SERVICE_ID"))
+    )
+
+
+def prepare_database_directory(database_path):
+    parent = database_path.parent
+    if is_render_environment() and not parent.is_dir():
+        raise RuntimeError(
+            f"O diretório persistente do banco não está montado: {parent}. "
+            "No painel do Render, adicione um Persistent Disk com esse Mount Path "
+            "e configure DATABASE_PATH para um arquivo dentro dele."
+        )
+
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError as error:
+        if is_render_environment():
+            raise RuntimeError(
+                f"Sem permissão para acessar {parent}. No Render, monte um "
+                "Persistent Disk nesse caminho e configure DATABASE_PATH dentro dele."
+            ) from error
+        raise
+
+    if not parent.is_dir() or not os.access(parent, os.W_OK):
+        raise RuntimeError(f"O diretório do banco não existe ou não permite gravação: {parent}.")
 
 
 def load_environment_file(environment_path=ROOT / ".env"):
@@ -222,7 +254,15 @@ def send_project_notification(settings, notification):
         )
 
         class RejectRedirects(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+            def redirect_request(
+                self,
+                _request,
+                _file_pointer,
+                _code,
+                _message,
+                _headers,
+                _new_url,
+            ):
                 return None
 
         opener = urllib.request.build_opener(RejectRedirects)
@@ -283,6 +323,11 @@ def deliver_pending_notifications(server, contract_id=None):
             ) as error:
                 attempts = notification["attempts"] + 1
                 retry_delay = min(60 * (2 ** min(attempts - 1, 10)), MAIL_MAX_RETRY_DELAY)
+                error_code = (
+                    f"HTTP_{error.code}"
+                    if isinstance(error, urllib.error.HTTPError)
+                    else type(error).__name__
+                )
                 with closing(connect_database(server.database_path)) as connection:
                     with connection:
                         connection.execute(
@@ -294,14 +339,14 @@ def deliver_pending_notifications(server, contract_id=None):
                             (
                                 attempts,
                                 now + retry_delay,
-                                type(error).__name__,
+                                error_code,
                                 notification["contract_id"],
                             ),
                         )
                 logging.error(
                     "E-mail da solicitação #%s não enviado (%s); nova tentativa em %s s.",
                     notification["contract_id"],
-                    type(error).__name__,
+                    error_code,
                     retry_delay,
                 )
             else:
@@ -364,7 +409,7 @@ def connect_database(database_path):
 
 def initialize_database(database_path=None):
     database_path = Path(database_path or configured_database_path())
-    database_path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_database_directory(database_path)
 
     with closing(connect_database(database_path)) as connection:
         connection.executescript(
@@ -698,7 +743,13 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "database": "ok",
-                    "email_provider": "configured" if self.server.email_settings else "missing",
+                    "email_provider": (
+                        "resend"
+                        if isinstance(self.server.email_settings, ResendSettings)
+                        else "smtp"
+                        if isinstance(self.server.email_settings, SMTPSettings)
+                        else "missing"
+                    ),
                     "pending_emails": pending_emails,
                 },
             )

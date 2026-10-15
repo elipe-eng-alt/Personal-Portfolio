@@ -22,6 +22,7 @@ from server import (
     deliver_pending_notifications,
     initialize_database,
     parse_public_origin,
+    prepare_database_directory,
     send_project_notification,
 )
 
@@ -122,6 +123,21 @@ class PortfolioAPITests(unittest.TestCase):
             initialize_database()
 
         self.assertTrue(database_path.is_file())
+
+    def test_render_defaults_to_persistent_disk_and_requires_it_to_be_mounted(self):
+        with patch.dict(os.environ, {"RENDER": "true"}, clear=True):
+            self.assertEqual(
+                configured_database_path(),
+                Path("/var/data/portfolio.sqlite3"),
+            )
+
+        missing_mount = Path(self.temp_dir.name) / "missing-render-disk"
+        database_path = missing_mount / "portfolio.sqlite3"
+        with patch.dict(os.environ, {"RENDER": "true"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "Persistent Disk"):
+                prepare_database_directory(database_path)
+
+        self.assertFalse(missing_mount.exists())
 
     def test_health_endpoints_report_database_and_email_configuration(self):
         health_status, health = self.request(self.opener, "/health")
