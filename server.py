@@ -11,10 +11,13 @@ import ssl
 import sqlite3
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import parseaddr
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +25,7 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
-DATABASE_PATH = ROOT / "data" / "portfolio.sqlite3"
+DEFAULT_DATABASE_PATH = ROOT / "data" / "portfolio.sqlite3"
 COOKIE_NAME = "portfolio_session"
 SESSION_LIFETIME = 7 * 24 * 60 * 60
 PASSWORD_ITERATIONS = 600_000
@@ -84,6 +87,34 @@ class EmailNotConfiguredError(Exception):
 
 
 @dataclass(frozen=True)
+class ResendSettings:
+    api_key: str
+    sender: str
+
+    @classmethod
+    def from_environment(cls):
+        api_key = os.environ.get("RESEND_API_KEY", "").strip()
+        if not api_key:
+            return None
+        if len(api_key) > 4_096 or any(character.isspace() for character in api_key):
+            raise ValueError("RESEND_API_KEY é inválida.")
+
+        sender = os.environ.get(
+            "EMAIL_FROM",
+            "Felipe Portfolio <onboarding@resend.dev>",
+        ).strip()
+        sender_address = parseaddr(sender)[1]
+        if (
+            "\r" in sender
+            or "\n" in sender
+            or not EMAIL_PATTERN.fullmatch(sender_address)
+        ):
+            raise ValueError("EMAIL_FROM precisa ser um endereço de e-mail válido.")
+
+        return cls(api_key, sender)
+
+
+@dataclass(frozen=True)
 class SMTPSettings:
     host: str
     port: int
@@ -117,6 +148,17 @@ class SMTPSettings:
         return cls(host, port, username, password, recipient)
 
 
+def configured_database_path():
+    configured_path = os.environ.get("DATABASE_PATH", "").strip()
+    if not configured_path:
+        return DEFAULT_DATABASE_PATH
+
+    path = Path(configured_path).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
 def load_environment_file(environment_path=ROOT / ".env"):
     try:
         contents = Path(environment_path).read_text(encoding="utf-8")
@@ -142,18 +184,14 @@ def load_environment_file(environment_path=ROOT / ".env"):
 def send_project_notification(settings, notification):
     if settings is None:
         raise EmailNotConfiguredError(
-            "Configure SMTP_USER e SMTP_PASSWORD para enviar notificações."
+            "Configure RESEND_API_KEY ou SMTP_USER e SMTP_PASSWORD para enviar notificações."
         )
 
-    message = EmailMessage()
-    message["From"] = settings.username
-    message["To"] = settings.recipient
-    message["Reply-To"] = notification["customer_email"]
-    message["Subject"] = (
+    subject = (
         f"Nova solicitação de projeto #{notification['contract_id']}: "
         f"{notification['service_title']}"
     )
-    message.set_content(
+    body = (
         "Você recebeu uma nova solicitação pelo portfólio.\n\n"
         f"Cliente: {notification['customer_email']}\n"
         f"Serviço: {notification['service_title']}\n"
@@ -162,6 +200,45 @@ def send_project_notification(settings, notification):
         "O que o cliente escreveu:\n"
         f"{notification['description'] or '(Nenhum detalhe adicional enviado.)'}\n"
     )
+
+    if isinstance(settings, ResendSettings):
+        payload = json.dumps(
+            {
+                "from": settings.sender,
+                "to": [OWNER_EMAIL],
+                "reply_to": notification["customer_email"],
+                "subject": subject,
+                "text": body,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        class RejectRedirects(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                return None
+
+        opener = urllib.request.build_opener(RejectRedirects)
+        with opener.open(request, timeout=15) as response:
+            if not 200 <= response.status < 300:
+                raise urllib.error.URLError(
+                    f"Resend respondeu com HTTP {response.status}."
+                )
+        return
+
+    message = EmailMessage()
+    message["From"] = settings.username
+    message["To"] = settings.recipient
+    message["Reply-To"] = notification["customer_email"]
+    message["Subject"] = subject
+    message.set_content(body)
 
     with smtplib.SMTP(settings.host, settings.port, timeout=15) as client:
         client.ehlo()
@@ -196,11 +273,12 @@ def deliver_pending_notifications(server, contract_id=None):
         for row in notifications:
             notification = dict(row)
             try:
-                server.email_sender(server.smtp_settings, notification)
+                server.email_sender(server.email_settings, notification)
             except (
                 EmailNotConfiguredError,
                 OSError,
                 smtplib.SMTPException,
+                urllib.error.URLError,
                 ValueError,
             ) as error:
                 attempts = notification["attempts"] + 1
@@ -284,8 +362,8 @@ def connect_database(database_path):
     return connection
 
 
-def initialize_database(database_path=DATABASE_PATH):
-    database_path = Path(database_path)
+def initialize_database(database_path=None):
+    database_path = Path(database_path or configured_database_path())
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
     with closing(connect_database(database_path)) as connection:
@@ -398,9 +476,12 @@ class PortfolioHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address, request_handler, database_path=DATABASE_PATH):
-        self.database_path = Path(database_path)
-        self.smtp_settings = SMTPSettings.from_environment()
+    def __init__(self, server_address, request_handler, database_path=None):
+        self.database_path = Path(database_path or configured_database_path())
+        self.email_settings = (
+            ResendSettings.from_environment()
+            or SMTPSettings.from_environment()
+        )
         configured_origin = os.environ.get("APP_ORIGIN", "").strip()
         self.public_origin = parse_public_origin(configured_origin) if configured_origin else None
         self.email_sender = send_project_notification
@@ -590,6 +671,38 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+
+        if path == "/health":
+            try:
+                with closing(connect_database(self.server.database_path)) as connection:
+                    connection.execute("SELECT 1").fetchone()
+            except sqlite3.Error:
+                logging.exception("A verificação de saúde não conseguiu acessar o banco.")
+                self.send_json(503, {"status": "unavailable"})
+                return
+            self.send_json(200, {"status": "ok"})
+            return
+        if path == "/api/health":
+            try:
+                with closing(connect_database(self.server.database_path)) as connection:
+                    connection.execute("SELECT 1").fetchone()
+                    pending_emails = connection.execute(
+                        "SELECT COUNT(*) AS count FROM email_outbox WHERE status = 'pending'"
+                    ).fetchone()["count"]
+            except sqlite3.Error:
+                logging.exception("A verificação de saúde não conseguiu acessar o banco.")
+                self.send_json(503, {"status": "unavailable"})
+                return
+            self.send_json(
+                200,
+                {
+                    "status": "ok",
+                    "database": "ok",
+                    "email_provider": "configured" if self.server.email_settings else "missing",
+                    "pending_emails": pending_emails,
+                },
+            )
+            return
 
         if path in PAGE_PATHS:
             self.send_static_file(ROOT / "index.html")
@@ -930,10 +1043,15 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
 
 def main():
     load_environment_file()
-    initialize_database()
+    database_path = configured_database_path()
+    initialize_database(database_path)
     host = "0.0.0.0"
     port = int(os.environ.get("PORT", "8000"))
-    server = PortfolioHTTPServer((host, port), PortfolioRequestHandler)
+    server = PortfolioHTTPServer(
+        (host, port),
+        PortfolioRequestHandler,
+        database_path=database_path,
+    )
     email_worker = threading.Thread(
         target=run_email_worker,
         args=(server,),

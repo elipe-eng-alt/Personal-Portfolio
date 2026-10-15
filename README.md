@@ -13,26 +13,39 @@ Também é possível iniciar manualmente no terminal, dentro desta pasta:
 py -3 server.py
 ```
 
-O servidor usa apenas a biblioteca padrão do Python. Os cadastros, sessões, solicitações de contratação e tarefas ficam no banco SQLite `data/portfolio.sqlite3`, criado automaticamente na primeira inicialização. Esse arquivo não deve ser publicado nem enviado ao Git.
+O servidor usa apenas a biblioteca padrão do Python. Os cadastros, sessões, solicitações de contratação, tarefas e fila de e-mails ficam no banco SQLite. Localmente, o arquivo padrão é `data/portfolio.sqlite3`; use `DATABASE_PATH` para escolher outro caminho. O banco não deve ser publicado nem enviado ao Git.
 
 ## Notificações de novas solicitações por e-mail
 
 O formulário do catálogo registra o pedido e envia o texto escrito pelo cliente, o e-mail dele e o serviço solicitado para `felipegabrieloliveira1000@gmail.com`.
 
-1. Ative a verificação em duas etapas da sua Conta Google.
-2. Crie uma **senha de app** para o Gmail. Não use nem compartilhe a senha normal da conta.
-3. Na pasta do projeto, execute `Copy-Item .env.example .env` no PowerShell e substitua `COLE_SUA_SENHA_DE_APP_AQUI` no arquivo `.env` pela senha de app do Gmail, sem espaços.
-4. Execute ou reinicie `start.bat` para carregar as configurações. Nunca cole a senha aqui no chat, no código-fonte ou em um repositório público.
+Na hospedagem Render, configure o envio recomendado por HTTPS:
 
-O envio usa SMTP autenticado com STARTTLS e validação do certificado. O endereço de destino é fixado no servidor; o cliente não pode escolher o destinatário. Se o provedor estiver indisponível ou a senha ainda não estiver configurada, a solicitação continua salva e o servidor mantém a notificação em uma fila SQLite, tentando novamente automaticamente. A página informa quando o envio está pendente. Os detalhes das solicitações ficam no banco local.
+1. Crie uma conta no Resend e gere uma API key.
+2. Configure `RESEND_API_KEY` no painel do Render como variável secreta. Não coloque a chave no repositório ou no chat.
+3. Para testes, o remetente padrão é `Felipe Portfolio <onboarding@resend.dev>`; para produção, valide um domínio no Resend e defina `EMAIL_FROM` com um remetente desse domínio.
+4. Salve as variáveis e faça o redeploy do serviço.
+
+O Render pode bloquear o SMTP de saída nas portas comuns de e-mail. Por isso, o Resend envia por HTTPS. SMTP autenticado com STARTTLS permanece disponível para provedores/hospedagens que permitem conexões SMTP, usando `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASSWORD`.
+
+O endereço de destino é fixado no servidor em `felipegabrieloliveira1000@gmail.com`; o cliente não pode escolher o destinatário. Se o provedor estiver indisponível ou não estiver configurado, a solicitação continua salva e a notificação fica na fila SQLite para novas tentativas. `/api/health` informa se há provedor configurado e quantos e-mails estão pendentes, sem revelar credenciais.
 
 A API usada pelo formulário é `POST /api/contracts`, com a sessão de cliente autenticada e um JSON como `{"service_id":"custom-project","description":"Preciso de um site para minha loja."}`. O servidor busca o e-mail do cliente da sessão e envia o texto em e-mail simples, com o seu endereço como único destinatário e o e-mail do cliente configurado como endereço para resposta.
 
-As rotas de escrita exigem uma origem válida. Um cliente autenticado pode enviar até cinco solicitações por hora. Se publicar o site, configure `APP_ORIGIN` com a origem HTTPS exata do domínio e cadastre as variáveis SMTP nos segredos do serviço de hospedagem em vez de salvar o `.env` no servidor público.
+As rotas de escrita exigem uma origem válida. Um cliente autenticado pode enviar até cinco solicitações por hora. Se publicar o site, configure `APP_ORIGIN` com a origem HTTPS exata do domínio e cadastre as credenciais do Resend ou SMTP nos segredos do serviço de hospedagem em vez de salvar o `.env` no servidor público.
 
-### Configurar a origem no Render
+### Configurar o serviço no Render
 
-No painel do Render, abra o serviço `personal-portfolio-0lg6`, acesse **Environment** e adicione `APP_ORIGIN` com o valor exato `https://personal-portfolio-0lg6.onrender.com`. Salve as alterações e faça o redeploy do serviço. O `.env.example` também contém essa origem, mas o Render não importa esse arquivo automaticamente.
+No painel do Render, abra o serviço `personal-portfolio-0lg6`:
+
+1. Em **Environment**, configure `APP_ORIGIN=https://personal-portfolio-0lg6.onrender.com`, `DATABASE_PATH=/var/data/portfolio.sqlite3` e `RESEND_API_KEY`. Opcionalmente configure `EMAIL_FROM` após validar o domínio no Resend.
+2. Em **Disks**, adicione um disco persistente montado em `/var/data`. O Render não importa `.env.example`; defina as variáveis no painel.
+3. Em **Settings**, configure o Health Check Path como `/health`. O servidor usa automaticamente a porta fornecida pelo Render e escuta em `0.0.0.0`.
+4. Salve e faça o redeploy. Consulte `/api/health`: `database` deve ser `ok`, `email_provider` deve ser `configured` e `pending_emails` deve diminuir depois do envio.
+
+**Persistência:** o SQLite fica no disco ligado ao serviço. Sem um disco persistente, os arquivos do sistema de arquivos do serviço podem desaparecer em reinicializações ou novos deploys; com SQLite e disco, mantenha uma única instância da aplicação. Discos persistentes podem exigir um plano pago no Render; confira o preço no painel antes de ativar. Se seu plano não permitir disco, use um banco PostgreSQL gerenciado e migre o backend antes de publicar.
+
+Cadastros e solicitações que não foram gravados em um banco persistente antigo não podem ser recuperados por este ajuste. Depois de conectar o disco, os novos cadastros e pedidos serão gravados em `/var/data/portfolio.sqlite3` e sobreviverão aos deploys.
 
 ## Preparar HTTPS com Caddy
 

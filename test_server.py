@@ -1,4 +1,5 @@
 import json
+import os
 import ssl
 import tempfile
 import threading
@@ -13,7 +14,9 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 from server import (
     PortfolioHTTPServer,
     PortfolioRequestHandler,
+    ResendSettings,
     SMTPSettings,
+    configured_database_path,
     connect_database,
     deliver_pending_notifications,
     initialize_database,
@@ -32,7 +35,7 @@ class PortfolioAPITests(unittest.TestCase):
             PortfolioRequestHandler,
             database_path=self.database_path,
         )
-        self.server.smtp_settings = None
+        self.server.email_settings = None
         self.server_thread = threading.Thread(
             target=self.server.serve_forever,
             daemon=True,
@@ -92,6 +95,25 @@ class PortfolioAPITests(unittest.TestCase):
         self.assertEqual(user["email"], "felipe@example.com")
         self.assertTrue(user["password_hash"].startswith("pbkdf2_sha256$"))
         self.assertNotIn("strong-password-123", user["password_hash"])
+
+    def test_database_path_can_be_configured_for_persistent_render_disk(self):
+        database_path = Path(self.temp_dir.name) / "persistent" / "portfolio.sqlite3"
+        with patch.dict(os.environ, {"DATABASE_PATH": str(database_path)}, clear=True):
+            self.assertEqual(configured_database_path(), database_path.resolve())
+            initialize_database()
+
+        self.assertTrue(database_path.is_file())
+
+    def test_health_endpoints_report_database_and_email_configuration(self):
+        health_status, health = self.request(self.opener, "/health")
+        diagnostics_status, diagnostics = self.request(self.opener, "/api/health")
+
+        self.assertEqual(health_status, 200)
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(diagnostics_status, 200)
+        self.assertEqual(diagnostics["database"], "ok")
+        self.assertEqual(diagnostics["email_provider"], "missing")
+        self.assertEqual(diagnostics["pending_emails"], 0)
 
     def test_duplicate_email_is_rejected(self):
         first_status, _ = self.register(self.opener, "client@example.com")
@@ -190,7 +212,7 @@ class PortfolioAPITests(unittest.TestCase):
     def test_project_request_email_uses_fixed_recipient_and_customer_reply_to(self):
         self.register(self.opener, "client@example.com")
         sent_notifications = []
-        self.server.smtp_settings = SMTPSettings(
+        self.server.email_settings = SMTPSettings(
             host="smtp.gmail.com",
             port=587,
             username="felipe@example.com",
@@ -263,6 +285,65 @@ class PortfolioAPITests(unittest.TestCase):
         self.assertEqual(message["Subject"], "Nova solicitação de projeto #27: Projeto sob medida")
         self.assertIn("Quero um site para meu negócio.", message.get_content())
 
+    @patch("server.urllib.request.build_opener")
+    def test_resend_delivery_uses_https_and_a_fixed_recipient(self, build_opener_mock):
+        response = build_opener_mock.return_value.open.return_value.__enter__.return_value
+        response.status = 200
+        settings = ResendSettings(
+            api_key="re_test_secret",
+            sender="Felipe Portfolio <onboarding@resend.dev>",
+        )
+        notification = {
+            "contract_id": 27,
+            "service_title": "Projeto sob medida",
+            "description": "Quero um site para meu negócio.",
+            "created_at": "2026-10-15T10:00:00+00:00",
+            "customer_email": "cliente@example.com",
+        }
+
+        send_project_notification(settings, notification)
+
+        request = build_opener_mock.return_value.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.resend.com/emails")
+        self.assertEqual(request.get_header("Authorization"), "Bearer re_test_secret")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        payload = json.loads(request.data)
+        self.assertEqual(payload["to"], ["felipegabrieloliveira1000@gmail.com"])
+        self.assertEqual(payload["reply_to"], "cliente@example.com")
+        self.assertIn("Quero um site para meu negócio.", payload["text"])
+        self.assertEqual(
+            build_opener_mock.return_value.open.call_args.kwargs["timeout"],
+            15,
+        )
+
+    def test_resend_settings_require_valid_sender(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RESEND_API_KEY": "re_test_secret",
+                "EMAIL_FROM": "attacker@example.com\r\nBcc: attacker@example.com",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ValueError):
+                ResendSettings.from_environment()
+
+    def test_resend_environment_settings_are_loaded_for_render(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RESEND_API_KEY": "re_test_secret",
+                "EMAIL_FROM": "Felipe Portfolio <onboarding@resend.dev>",
+                "SMTP_USER": "",
+                "SMTP_PASSWORD": "",
+            },
+            clear=True,
+        ):
+            settings = ResendSettings.from_environment()
+
+        self.assertEqual(settings.api_key, "re_test_secret")
+        self.assertEqual(settings.sender, "Felipe Portfolio <onboarding@resend.dev>")
+
     def test_pending_email_is_retried_after_smtp_becomes_available(self):
         self.register(self.opener, "client@example.com")
         with self.assertLogs("root", level="ERROR"):
@@ -277,7 +358,7 @@ class PortfolioAPITests(unittest.TestCase):
             )
         self.assertEqual(first_result["email_status"], "pending")
 
-        self.server.smtp_settings = SMTPSettings(
+        self.server.email_settings = SMTPSettings(
             host="smtp.gmail.com",
             port=587,
             username="felipe@example.com",
@@ -345,7 +426,7 @@ class PortfolioAPITests(unittest.TestCase):
 
     def test_project_requests_are_rate_limited_per_client(self):
         self.register(self.opener, "client@example.com")
-        self.server.smtp_settings = SMTPSettings(
+        self.server.email_settings = SMTPSettings(
             host="smtp.gmail.com",
             port=587,
             username="felipe@example.com",
