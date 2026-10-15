@@ -30,6 +30,10 @@ A API usada pelo formulário é `POST /api/contracts`, com a sessão de cliente 
 
 As rotas de escrita exigem uma origem válida. Um cliente autenticado pode enviar até cinco solicitações por hora. Se publicar o site, configure `APP_ORIGIN` com a origem HTTPS exata do domínio e cadastre as variáveis SMTP nos segredos do serviço de hospedagem em vez de salvar o `.env` no servidor público.
 
+### Configurar a origem no Render
+
+No painel do Render, abra o serviço `personal-portfolio-0lg6`, acesse **Environment** e adicione `APP_ORIGIN` com o valor exato `https://personal-portfolio-0lg6.onrender.com`. Salve as alterações e faça o redeploy do serviço. O `.env.example` também contém essa origem, mas o Render não importa esse arquivo automaticamente.
+
 ## Preparar HTTPS com Caddy
 
 O arquivo `Caddyfile` prepara o proxy HTTPS automático do Caddy para um servidor público na mesma máquina do backend:

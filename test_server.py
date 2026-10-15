@@ -314,19 +314,21 @@ class PortfolioAPITests(unittest.TestCase):
         self.assertEqual(result["error"], "Origem da solicitação inválida.")
 
     def test_https_origin_requires_exact_domain_and_marks_session_cookies_secure(self):
-        self.server.public_origin = parse_public_origin("https://portfolio.example.com")
+        self.server.public_origin = parse_public_origin(
+            "https://personal-portfolio-0lg6.onrender.com"
+        )
         handler = object.__new__(PortfolioRequestHandler)
         handler.server = self.server
         handler.headers = {
-            "Origin": "https://portfolio.example.com",
-            "Host": "portfolio.example.com",
+            "Origin": "https://personal-portfolio-0lg6.onrender.com",
+            "Host": "personal-portfolio-0lg6.onrender.com",
         }
 
         self.assertTrue(handler.has_valid_request_origin())
         self.assertIn("; Secure", handler.set_session_cookie("session-token")[1])
         self.assertIn("; Secure", handler.clear_session_cookie()[1])
 
-        handler.headers["Origin"] = "http://portfolio.example.com"
+        handler.headers["Origin"] = "http://personal-portfolio-0lg6.onrender.com"
         self.assertFalse(handler.has_valid_request_origin())
         handler.headers["Origin"] = "https://attacker.example"
         self.assertFalse(handler.has_valid_request_origin())
