@@ -931,7 +931,9 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
 def main():
     load_environment_file()
     initialize_database()
-    server = PortfolioHTTPServer(("127.0.0.1", 8000), PortfolioRequestHandler)
+    host = "0.0.0.0"
+    port = int(os.environ.get("PORT", "8000"))
+    server = PortfolioHTTPServer((host, port), PortfolioRequestHandler)
     email_worker = threading.Thread(
         target=run_email_worker,
         args=(server,),
@@ -939,7 +941,7 @@ def main():
         daemon=True,
     )
     email_worker.start()
-    print("Portal iniciado em http://127.0.0.1:8000")
+    print(f"Portal iniciado em http://{host}:{port}")
     print("Pressione Ctrl+C para encerrar.")
     try:
         server.serve_forever()
