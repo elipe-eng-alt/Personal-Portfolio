@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import ssl
 import tempfile
@@ -65,11 +66,29 @@ class PortfolioAPITests(unittest.TestCase):
             method=method,
             headers=headers,
         )
+
         try:
             with opener.open(request) as response:
                 return response.status, json.loads(response.read())
+
         except HTTPError as error:
-            return error.code, json.loads(error.read())
+            response_body = error.read().decode(
+                "utf-8",
+                errors="replace"
+            )
+
+            logging.error(
+                "Erro HTTP ao enviar e-mail: código=%s, resposta=%s",
+                error.code,
+                response_body
+            )
+
+            try:
+                response_data = json.loads(response_body)
+            except (json.JSONDecodeError, TypeError):
+                response_data = {"message": response_body}
+
+            return error.code, response_data
 
     def register(self, opener, email):
         return self.request(
