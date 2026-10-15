@@ -18,6 +18,7 @@ from server import (
     ResendSettings,
     SMTPSettings,
     configured_database_path,
+    configured_public_origin,
     connect_database,
     deliver_pending_notifications,
     initialize_database,
@@ -431,23 +432,47 @@ class PortfolioAPITests(unittest.TestCase):
 
     def test_https_origin_requires_exact_domain_and_marks_session_cookies_secure(self):
         self.server.public_origin = parse_public_origin(
-            "https://personal-portfolio-0lg6.onrender.com"
+            "https://personal-portfolio-production-b12c.up.railway.app"
         )
         handler = object.__new__(PortfolioRequestHandler)
         handler.server = self.server
         handler.headers = {
-            "Origin": "https://personal-portfolio-0lg6.onrender.com",
-            "Host": "personal-portfolio-0lg6.onrender.com",
+            "Origin": "https://personal-portfolio-production-b12c.up.railway.app",
+            "Host": "personal-portfolio-production-b12c.up.railway.app",
         }
 
         self.assertTrue(handler.has_valid_request_origin())
         self.assertIn("; Secure", handler.set_session_cookie("session-token")[1])
         self.assertIn("; Secure", handler.clear_session_cookie()[1])
 
-        handler.headers["Origin"] = "http://personal-portfolio-0lg6.onrender.com"
+        handler.headers["Origin"] = "http://personal-portfolio-production-b12c.up.railway.app"
+        self.assertFalse(handler.has_valid_request_origin())
+        handler.headers["Origin"] = "https://personal-portfolio-0lg6.onrender.com"
         self.assertFalse(handler.has_valid_request_origin())
         handler.headers["Origin"] = "https://attacker.example"
         self.assertFalse(handler.has_valid_request_origin())
+
+    def test_railway_defaults_to_the_configured_public_origin(self):
+        expected_origin = ("https", "personal-portfolio-production-b12c.up.railway.app")
+        with patch.dict(
+            os.environ,
+            {"RAILWAY_ENVIRONMENT": "production"},
+            clear=True,
+        ):
+            self.assertEqual(configured_public_origin(), expected_origin)
+
+        with patch.dict(
+            os.environ,
+            {
+                "RAILWAY_ENVIRONMENT": "production",
+                "APP_ORIGIN": "https://attacker.example",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                configured_public_origin(),
+                expected_origin,
+            )
 
     def test_public_origin_rejects_paths_and_credentials(self):
         for origin in (

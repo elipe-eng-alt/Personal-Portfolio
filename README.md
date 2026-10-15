@@ -19,20 +19,33 @@ O servidor usa apenas a biblioteca padrão do Python. Os cadastros, sessões, so
 
 O formulário do catálogo registra o pedido e envia o texto escrito pelo cliente, o e-mail dele e o serviço solicitado para `felipegabrieloliveira1000@gmail.com`.
 
-Na hospedagem Render, configure o envio recomendado por HTTPS:
+No Railway ou no Render, configure o envio recomendado por HTTPS:
 
 1. Crie uma conta no Resend e gere uma API key.
-2. Configure `RESEND_API_KEY` no painel do Render como variável secreta. Não coloque a chave no repositório ou no chat.
+2. Configure `RESEND_API_KEY` no painel da hospedagem como variável secreta. Não coloque a chave no repositório ou no chat.
 3. Para testes, o remetente padrão é `Felipe Portfolio <onboarding@resend.dev>`; para produção, valide um domínio no Resend e defina `EMAIL_FROM` com um remetente desse domínio.
 4. Salve as variáveis e faça o redeploy do serviço.
 
-O Render pode bloquear o SMTP de saída nas portas comuns de e-mail. Por isso, o Resend envia por HTTPS. SMTP autenticado com STARTTLS permanece disponível para provedores/hospedagens que permitem conexões SMTP, usando `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASSWORD`.
+Algumas hospedagens podem bloquear o SMTP de saída nas portas comuns de e-mail. Por isso, o Resend envia por HTTPS. SMTP autenticado com STARTTLS permanece disponível para provedores/hospedagens que permitem conexões SMTP, usando `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASSWORD`.
 
 O endereço de destino é fixado no servidor em `felipegabrieloliveira1000@gmail.com`; o cliente não pode escolher o destinatário. Se o provedor estiver indisponível ou não estiver configurado, a solicitação continua salva e a notificação fica na fila SQLite para novas tentativas. `/api/health` informa se há provedor configurado e quantos e-mails estão pendentes, sem revelar credenciais.
 
 A API usada pelo formulário é `POST /api/contracts`, com a sessão de cliente autenticada e um JSON como `{"service_id":"custom-project","description":"Preciso de um site para minha loja."}`. O servidor busca o e-mail do cliente da sessão e envia o texto em e-mail simples, com o seu endereço como único destinatário e o e-mail do cliente configurado como endereço para resposta.
 
-As rotas de escrita exigem uma origem válida. Um cliente autenticado pode enviar até cinco solicitações por hora. Se publicar o site, configure `APP_ORIGIN` com a origem HTTPS exata do domínio e cadastre as credenciais do Resend ou SMTP nos segredos do serviço de hospedagem em vez de salvar o `.env` no servidor público.
+As rotas de escrita exigem uma origem válida. Um cliente autenticado pode enviar até cinco solicitações por hora. Em produção, configure `APP_ORIGIN` com a origem HTTPS exata do domínio público e cadastre as credenciais do Resend ou SMTP nas variáveis secretas da hospedagem, não no repositório.
+
+### Configurar o serviço no Railway
+
+No serviço Railway que publica este site, configure em **Variables**:
+
+- `APP_ORIGIN=https://personal-portfolio-production-b12c.up.railway.app`
+- `RESEND_API_KEY` com sua chave secreta do Resend, ou `SMTP_USER` e `SMTP_PASSWORD` se for usar SMTP.
+- `EMAIL_FROM` somente se já tiver um remetente validado no Resend.
+- `DATABASE_PATH=/data/portfolio.sqlite3` se adicionar um Volume Railway montado em `/data`.
+
+O backend usa a porta fornecida pelo Railway (`PORT`) e escuta em `0.0.0.0`. No Railway, a origem permitida fica fixa em `https://personal-portfolio-production-b12c.up.railway.app`; outras origens, inclusive o domínio antigo do Render, são recusadas nas operações de escrita. Configure também `APP_ORIGIN` com esse valor no painel e faça redeploy após salvar as variáveis. Para verificar o serviço, abra `https://personal-portfolio-production-b12c.up.railway.app/api/health`: `database` deve ser `ok` e `email_provider` deve indicar o provedor configurado.
+
+O SQLite no sistema de arquivos efêmero do serviço não garante persistência entre deploys. Para preservar cadastros, adicione um Volume Railway e configure `DATABASE_PATH` para um arquivo dentro do caminho montado, como `/data/portfolio.sqlite3`.
 
 ### Configurar o serviço no Render
 

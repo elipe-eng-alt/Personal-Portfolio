@@ -35,6 +35,7 @@ MAIL_RETRY_INTERVAL = 30
 MAIL_MAX_RETRY_DELAY = 3_600
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 OWNER_EMAIL = "felipegabrieloliveira1000@gmail.com"
+RAILWAY_PUBLIC_ORIGIN = "https://personal-portfolio-production-b12c.up.railway.app"
 MONTHS_PT = (
     "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
     "Jul", "Ago", "Set", "Out", "Nov", "Dez",
@@ -400,6 +401,27 @@ def parse_public_origin(value):
     return origin.scheme, origin.netloc.casefold()
 
 
+def configured_public_origin():
+    if is_railway_environment():
+        return parse_public_origin(RAILWAY_PUBLIC_ORIGIN)
+
+    configured_origin = os.environ.get("APP_ORIGIN", "").strip()
+    if configured_origin:
+        return parse_public_origin(configured_origin)
+    return None
+
+
+def is_railway_environment():
+    return any(
+        os.environ.get(name)
+        for name in (
+            "RAILWAY_ENVIRONMENT",
+            "RAILWAY_PROJECT_ID",
+            "RAILWAY_SERVICE_ID",
+        )
+    )
+
+
 def connect_database(database_path):
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
@@ -527,8 +549,7 @@ class PortfolioHTTPServer(ThreadingHTTPServer):
             ResendSettings.from_environment()
             or SMTPSettings.from_environment()
         )
-        configured_origin = os.environ.get("APP_ORIGIN", "").strip()
-        self.public_origin = parse_public_origin(configured_origin) if configured_origin else None
+        self.public_origin = configured_public_origin()
         self.email_sender = send_project_notification
         self.notification_lock = threading.Lock()
         self.email_worker_wakeup = threading.Event()
