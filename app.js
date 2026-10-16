@@ -5,12 +5,14 @@ const pagesByPath = new Map([
 	["/tasks", "tasks"],
 	["/services", "services"],
 	["/projects", "projects"],
+	["/admin", "admin"],
 	["/access", "access"],
 	["/login", "login"],
 	["/register", "register"],
 ]);
 
-const protectedPages = new Set(["tasks", "projects"]);
+const protectedPages = new Set(["tasks", "projects", "admin"]);
+const contractStatuses = ["Solicitado", "Em andamento", "Concluído", "Cancelado"];
 const svgNamespace = "http://www.w3.org/2000/svg";
 let currentUser;
 let pendingPath = "/projects";
@@ -19,6 +21,8 @@ const appStatus = document.querySelector("#app-status");
 const accountEmail = document.querySelector("#account-email");
 const loginLink = document.querySelector("#login-link");
 const logoutButton = document.querySelector("#logout-button");
+const adminLink = document.querySelector("#admin-link");
+const ownerServicesCard = document.querySelector("#owner-services-card");
 
 function setGlobalStatus(message = "") {
 	appStatus.textContent = message;
@@ -31,6 +35,9 @@ function updateAccountControls() {
 	accountEmail.hidden = !isSignedIn;
 	loginLink.hidden = isSignedIn;
 	logoutButton.hidden = !isSignedIn;
+	const isOwner = currentUser?.role === "owner";
+	adminLink.hidden = !isOwner;
+	ownerServicesCard.hidden = !isOwner;
 }
 
 async function requestJson(path, options = {}) {
@@ -79,6 +86,7 @@ function pageTitle(pageName) {
 		tasks: "Painel de tarefas — Felipe",
 		services: "Serviços — Felipe",
 		projects: "Projetos disponíveis — Felipe",
+		admin: "Gestão de solicitações — Felipe",
 		access: "Acesso do cliente — Felipe",
 		login: "Entrar — Felipe",
 		register: "Cadastro — Felipe",
@@ -106,6 +114,13 @@ async function renderRoute() {
 			pageTitle("access");
 			return;
 		}
+		if (pageName === "admin" && currentUser.role !== "owner") {
+			window.history.replaceState({}, "", "/");
+			activePage("home");
+			pageTitle("home");
+			setGlobalStatus("Esta área é restrita ao responsável pelo projeto.");
+			return;
+		}
 	}
 
 	if (pageName === "access" || pageName === "login" || pageName === "register") {
@@ -126,6 +141,8 @@ async function renderRoute() {
 		await loadTasks();
 	} else if (pageName === "services" || pageName === "projects") {
 		await loadServices();
+	} else if (pageName === "admin") {
+		await loadAdminContracts();
 	}
 }
 
@@ -406,7 +423,109 @@ async function loadTasks() {
 	}
 }
 
+function renderAdminContracts(contracts) {
+	const container = document.querySelector("#admin-contracts-list");
+	container.replaceChildren();
+	if (contracts.length === 0) {
+		container.append(
+			makeElement("p", "empty-state", "Ainda não há solicitações de clientes."),
+		);
+		return;
+	}
+
+	contracts.forEach((contract) => {
+		const card = makeElement("article", "record-card admin-request-card");
+		const header = makeElement("div", "record-heading");
+		const titleBlock = document.createElement("div");
+		titleBlock.append(makeElement("h2", "", contract.service_title));
+		titleBlock.append(
+			makeElement("span", "record-date", `Solicitação #${contract.id}`),
+		);
+		header.append(titleBlock, makeElement("span", "record-status", contract.status));
+		card.append(header);
+
+		const createdAt = new Date(contract.created_at);
+		card.append(
+			makeElement(
+				"p",
+				"record-date",
+				`Cliente: ${contract.customer_email} · ${createdAt.toLocaleString("pt-BR")}`,
+			),
+		);
+		card.append(
+			makeElement(
+				"p",
+				"record-description",
+				contract.description || "O cliente não deixou detalhes adicionais.",
+			),
+		);
+
+		const form = makeElement("form", "admin-status-form");
+		form.dataset.adminStatusForm = "";
+		const label = makeElement("label", "", "Status da solicitação");
+		const select = document.createElement("select");
+		select.id = `admin-contract-status-${contract.id}`;
+		select.name = "status";
+		select.setAttribute("aria-label", `Status da solicitação ${contract.id}`);
+		label.htmlFor = select.id;
+		contractStatuses.forEach((status) => {
+			const option = makeElement("option", "", status);
+			option.value = status;
+			option.selected = status === contract.status;
+			select.append(option);
+		});
+		const button = makeElement("button", "button primary", "Atualizar status");
+		button.type = "submit";
+		const message = makeElement("p", "form-message");
+		message.setAttribute("role", "status");
+		form.append(label, select, button, message);
+		form.dataset.contractId = String(contract.id);
+		card.append(form);
+		container.append(card);
+	});
+}
+
+async function loadAdminContracts() {
+	const container = document.querySelector("#admin-contracts-list");
+	container.replaceChildren(makeElement("p", "empty-state", "Carregando solicitações..."));
+	try {
+		const result = await requestJson("/api/admin/contracts");
+		renderAdminContracts(result.contracts);
+	} catch (error) {
+		container.replaceChildren(makeElement("p", "empty-state", error.message));
+		if (error.status === 401 || error.status === 403) {
+			await navigate("/", true);
+			setGlobalStatus("Esta área é restrita ao responsável pelo projeto.");
+		}
+	}
+}
+
 document.addEventListener("submit", async (event) => {
+	const adminStatusForm = event.target.closest("[data-admin-status-form]");
+	if (adminStatusForm) {
+		event.preventDefault();
+		const button = adminStatusForm.querySelector("button[type=submit]");
+		const message = adminStatusForm.querySelector(".form-message");
+		button.disabled = true;
+		message.textContent = "";
+		try {
+			await requestJson("/api/admin/contracts/status", {
+				method: "POST",
+				body: JSON.stringify({
+					contract_id: Number(adminStatusForm.dataset.contractId),
+					status: adminStatusForm.elements.status.value,
+				}),
+			});
+			await loadAdminContracts();
+			setGlobalStatus("Status da solicitação atualizado.");
+		} catch (error) {
+			message.textContent = error.message;
+		} finally {
+			button.disabled = false;
+		}
+		return;
+	}
+
 	const serviceForm = event.target.closest("[data-service-form]");
 	if (serviceForm) {
 		event.preventDefault();
@@ -471,7 +590,9 @@ document.addEventListener("submit", async (event) => {
 		);
 		currentUser = result.user;
 		updateAccountControls();
-		await navigate(pendingPath || "/");
+		await navigate(
+			result.user.role === "owner" ? "/admin" : pendingPath || "/",
+		);
 	} catch (error) {
 		message.textContent = error.message;
 	} finally {

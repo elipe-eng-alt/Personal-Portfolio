@@ -39,6 +39,8 @@ As rotas de escrita exigem uma origem válida. Um cliente autenticado pode envia
 No serviço Railway que publica este site, configure em **Variables**:
 
 - `APP_ORIGIN=https://personal-portfolio-production-b12c.up.railway.app`
+- `OWNER_EMAIL=felipegabrieloliveira1000@gmail.com`
+- `OWNER_PASSWORD` com uma senha forte de 10 a 128 caracteres, definida como variável secreta.
 - `RESEND_API_KEY` com sua chave secreta do Resend, ou `SMTP_USER` e `SMTP_PASSWORD` se for usar SMTP.
 - `EMAIL_FROM` somente se já tiver um remetente validado no Resend.
 - `DATABASE_PATH=/data/portfolio.sqlite3` se adicionar um Volume Railway montado em `/data`.
@@ -46,6 +48,12 @@ No serviço Railway que publica este site, configure em **Variables**:
 O backend usa a porta fornecida pelo Railway (`PORT`) e escuta em `0.0.0.0`. No Railway, a origem permitida fica fixa em `https://personal-portfolio-production-b12c.up.railway.app`; outras origens, inclusive o domínio antigo do Render, são recusadas nas operações de escrita. Configure também `APP_ORIGIN` com esse valor no painel e faça redeploy após salvar as variáveis. Para verificar o serviço, abra `https://personal-portfolio-production-b12c.up.railway.app/api/health`: `database` deve ser `ok` e `email_provider` deve indicar o provedor configurado.
 
 O SQLite no sistema de arquivos efêmero do serviço não garante persistência entre deploys. Para preservar cadastros, adicione um Volume Railway e configure `DATABASE_PATH` para um arquivo dentro do caminho montado, como `/data/portfolio.sqlite3`.
+
+### Painel privado do responsável
+
+Defina `OWNER_EMAIL` e `OWNER_PASSWORD` nas variáveis do Railway e faça redeploy. Na inicialização, o sistema cria ou promove somente essa conta configurada para o papel `owner`, com a senha armazenada em hash; usuários comuns não conseguem obter esse papel pelo formulário de cadastro. Entre com essas credenciais: o painel privado abre após o login e o link de gestão aparece para o owner. Nele é possível consultar todas as solicitações, clientes e descrições, além de atualizar cada solicitação para **Solicitado**, **Em andamento**, **Concluído** ou **Cancelado**.
+
+As rotas administrativas conferem o papel no backend em cada requisição. Ocultar o link para clientes comuns é apenas um ajuste visual; o bloqueio efetivo da listagem e das alterações é feito no servidor. Não use nem reutilize uma senha compartilhada anteriormente; configure uma nova senha forte somente no segredo `OWNER_PASSWORD`.
 
 ### Configurar o serviço no Render
 

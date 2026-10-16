@@ -33,14 +33,16 @@ a {
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 4px;
 }
 
 button,
 input,
-textarea {
+textarea,
+select {
 	font: inherit;
 }
 
@@ -505,6 +507,65 @@ p {
 	flex-direction: column;
 	padding: 23px;
 	transition: transform .2s, border-color .2s;
+}
+
+.owner-services-card {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	margin-top: 24px;
+	padding: 20px 23px;
+	border: 1px solid rgba(182, 156, 255, .45);
+	border-radius: 12px;
+	background: linear-gradient(115deg, rgba(182, 156, 255, .12), var(--surface));
+}
+
+.owner-services-card:hover {
+	border-color: var(--accent);
+}
+
+.owner-services-card .category {
+	color: var(--accent);
+	font-size: .78rem;
+	font-weight: 700;
+	letter-spacing: .08em;
+	text-transform: uppercase;
+}
+
+.owner-services-card strong {
+	font-size: 1.12rem;
+}
+
+.owner-services-card > span:last-child {
+	color: var(--muted);
+	font-size: .9rem;
+}
+
+.admin-status-form {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: end;
+	gap: 8px 12px;
+	margin-top: 18px;
+}
+
+.admin-status-form label {
+	grid-column: 1 / -1;
+	color: var(--muted);
+	font-size: .88rem;
+}
+
+.admin-status-form select {
+	min-height: 47px;
+	padding: 0 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: #121218;
+	color: var(--text);
+}
+
+.admin-status-form .form-message {
+	grid-column: 1 / -1;
 }
 
 .offer-card .category {

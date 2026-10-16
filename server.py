@@ -33,6 +33,13 @@ MAX_BODY_SIZE = 16_384
 MAX_PROJECT_REQUESTS_PER_HOUR = 5
 MAIL_RETRY_INTERVAL = 30
 MAIL_MAX_RETRY_DELAY = 3_600
+CONTRACT_STATUSES = ("Solicitado", "Em andamento", "Concluído", "Cancelado")
+CONTRACT_TASK_STATUSES = {
+    "Solicitado": ("Aguardando início", "Aguardando início", "Aguardando início"),
+    "Em andamento": ("Concluído", "Em andamento", "Aguardando início"),
+    "Concluído": ("Concluído", "Concluído", "Concluído"),
+    "Cancelado": ("Cancelado", "Cancelado", "Cancelado"),
+}
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 OWNER_EMAIL = "felipegabrieloliveira1000@gmail.com"
 RAILWAY_PUBLIC_ORIGIN = "https://personal-portfolio-production-b12c.up.railway.app"
@@ -47,6 +54,7 @@ PAGE_PATHS = {
     "/tasks",
     "/services",
     "/projects",
+    "/admin",
     "/register",
     "/login",
     "/access",
@@ -441,6 +449,8 @@ def initialize_database(database_path=None):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'customer'
+                    CHECK (role IN ('customer', 'owner')),
                 created_at TEXT NOT NULL
             );
 
@@ -493,6 +503,19 @@ def initialize_database(database_path=None):
             );
             """
         )
+        user_columns = {
+            column["name"]
+            for column in connection.execute("PRAGMA table_info(users)")
+        }
+        if "role" not in user_columns:
+            connection.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN role TEXT NOT NULL DEFAULT 'customer'
+                    CHECK (role IN ('customer', 'owner'))
+                """
+            )
+        provision_owner_account(connection)
         connection.executemany(
             """
             INSERT OR IGNORE INTO services (id, title, description, category)
@@ -501,6 +524,56 @@ def initialize_database(database_path=None):
             DEFAULT_SERVICES,
         )
         connection.commit()
+
+
+def provision_owner_account(connection):
+    email = os.environ.get("OWNER_EMAIL", OWNER_EMAIL).strip().casefold()
+    password = os.environ.get("OWNER_PASSWORD", "")
+    if not password:
+        return
+    if len(email) > 254 or not EMAIL_PATTERN.fullmatch(email):
+        raise ValueError("OWNER_EMAIL precisa ser um endereço de e-mail válido.")
+    if len(password) < 10 or len(password) > 128:
+        raise ValueError("OWNER_PASSWORD deve ter entre 10 e 128 caracteres.")
+
+    existing_user = connection.execute(
+        "SELECT id, password_hash, role FROM users WHERE email = ?",
+        (email,),
+    ).fetchone()
+    password_matches = (
+        existing_user is not None
+        and verify_password(password, existing_user["password_hash"])
+    )
+    password_hash = (
+        existing_user["password_hash"]
+        if password_matches
+        else hash_password(password)
+    )
+    if existing_user is not None and (
+        existing_user["role"] != "owner" or not password_matches
+    ):
+        connection.execute(
+            "DELETE FROM sessions WHERE user_id = ?",
+            (existing_user["id"],),
+        )
+    connection.execute(
+        "UPDATE users SET role = 'customer' WHERE role = 'owner' AND email != ?",
+        (email,),
+    )
+    connection.execute(
+        """
+        INSERT INTO users (email, password_hash, role, created_at)
+        VALUES (?, ?, 'owner', ?)
+        ON CONFLICT(email) DO UPDATE SET
+            password_hash = excluded.password_hash,
+            role = 'owner'
+        """,
+        (
+            email,
+            password_hash,
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
 
 
 def hash_password(password):
@@ -686,7 +759,7 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         with closing(connect_database(self.server.database_path)) as connection:
             return connection.execute(
                 """
-                SELECT users.id, users.email
+                SELECT users.id, users.email, users.role
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = ? AND sessions.expires_at > ?
@@ -736,6 +809,13 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def require_owner(self):
+        user = self.require_user()
+        if user is not None and user["role"] != "owner":
+            self.send_error_json(403, "Acesso restrito ao responsável pelo projeto.")
+            return None
+        return user
+
     def do_GET(self):
         path = urlsplit(self.path).path
 
@@ -777,6 +857,8 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/admin" and self.require_owner() is None:
+            return
         if path in PAGE_PATHS:
             self.send_static_file(ROOT / "index.html")
             return
@@ -787,7 +869,13 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
             user = self.current_user()
             self.send_json(
                 200,
-                {"user": {"email": user["email"]} if user else None},
+                {
+                    "user": (
+                        {"email": user["email"], "role": user["role"]}
+                        if user
+                        else None
+                    )
+                },
             )
             return
         if path == "/api/services":
@@ -806,8 +894,30 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
                 return
             self.send_tasks(user["id"])
             return
+        if path == "/api/admin/contracts":
+            if self.require_owner() is None:
+                return
+            self.send_admin_contracts()
+            return
 
         self.send_error_json(404, "Rota não encontrada.")
+
+    def send_admin_contracts(self):
+        with closing(connect_database(self.server.database_path)) as connection:
+            contracts = connection.execute(
+                """
+                SELECT contracts.id, users.email AS customer_email,
+                    contracts.service_title, contracts.description,
+                    contracts.status, contracts.created_at
+                FROM contracts
+                JOIN users ON users.id = contracts.user_id
+                ORDER BY contracts.created_at DESC, contracts.id DESC
+                """
+            ).fetchall()
+        self.send_json(
+            200,
+            {"contracts": [dict(contract) for contract in contracts]},
+        )
 
     def send_dashboard(self):
         now = datetime.now(timezone.utc)
@@ -937,6 +1047,9 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/contracts":
             self.create_contract(payload)
             return
+        if path == "/api/admin/contracts/status":
+            self.update_contract_status(payload)
+            return
         self.send_error_json(404, "Rota não encontrada.")
 
     def register(self, payload):
@@ -961,8 +1074,8 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
                 with connection:
                     cursor = connection.execute(
                         """
-                        INSERT INTO users (email, password_hash, created_at)
-                        VALUES (?, ?, ?)
+                        INSERT INTO users (email, password_hash, role, created_at)
+                        VALUES (?, ?, 'customer', ?)
                         """,
                         (email, password_hash, created_at),
                     )
@@ -977,7 +1090,7 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         token = self.create_session(user_id)
         self.send_json(
             201,
-            {"user": {"email": email}},
+            {"user": {"email": email, "role": "customer"}},
             (self.set_session_cookie(token),),
         )
 
@@ -995,7 +1108,7 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         email = email_value.strip().casefold()
         with closing(connect_database(self.server.database_path)) as connection:
             user = connection.execute(
-                "SELECT id, email, password_hash FROM users WHERE email = ?",
+                "SELECT id, email, password_hash, role FROM users WHERE email = ?",
                 (email,),
             ).fetchone()
 
@@ -1006,7 +1119,7 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         token = self.create_session(user["id"])
         self.send_json(
             200,
-            {"user": {"email": user["email"]}},
+            {"user": {"email": user["email"], "role": user["role"]}},
             (self.set_session_cookie(token),),
         )
 
@@ -1111,6 +1224,47 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
                 "status": "Solicitado",
                 "email_status": email_status,
             },
+        )
+
+    def update_contract_status(self, payload):
+        if self.require_owner() is None:
+            return
+
+        contract_id = payload.get("contract_id")
+        status = payload.get("status")
+        if (
+            not isinstance(contract_id, int)
+            or isinstance(contract_id, bool)
+            or contract_id < 1
+            or status not in CONTRACT_STATUSES
+        ):
+            self.send_error_json(400, "Informe uma solicitação e um status válidos.")
+            return
+
+        with closing(connect_database(self.server.database_path)) as connection:
+            with connection:
+                cursor = connection.execute(
+                    "UPDATE contracts SET status = ? WHERE id = ?",
+                    (status, contract_id),
+                )
+                if cursor.rowcount:
+                    task_statuses = CONTRACT_TASK_STATUSES[status]
+                    connection.executemany(
+                        """
+                        UPDATE tasks SET status = ?
+                        WHERE contract_id = ? AND position = ?
+                        """,
+                        (
+                            (task_status, contract_id, position)
+                            for position, task_status in enumerate(task_statuses, start=1)
+                        ),
+                    )
+        if cursor.rowcount == 0:
+            self.send_error_json(404, "Solicitação não encontrada.")
+            return
+        self.send_json(
+            200,
+            {"id": contract_id, "status": status},
         )
 
 

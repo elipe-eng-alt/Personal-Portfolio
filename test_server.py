@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sqlite3
 import ssl
 import tempfile
 import threading
@@ -111,11 +112,98 @@ class PortfolioAPITests(unittest.TestCase):
 
         with closing(connect_database(self.database_path)) as connection:
             user = connection.execute(
-                "SELECT email, password_hash FROM users"
+                "SELECT email, password_hash, role FROM users"
             ).fetchone()
         self.assertEqual(user["email"], "felipe@example.com")
+        self.assertEqual(user["role"], "customer")
         self.assertTrue(user["password_hash"].startswith("pbkdf2_sha256$"))
         self.assertNotIn("strong-password-123", user["password_hash"])
+
+    def test_existing_database_is_migrated_and_owner_is_provisioned_from_environment(self):
+        database_path = Path(self.temp_dir.name) / "legacy.sqlite3"
+        with closing(sqlite3.connect(database_path)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO users (email, password_hash, created_at)
+                VALUES (?, ?, ?)
+                """,
+                ("felipe@example.com", "legacy-invalid-hash", "2026-10-16T00:00:00+00:00"),
+            )
+            connection.execute(
+                """
+                INSERT INTO users (email, password_hash, created_at)
+                VALUES (?, ?, ?)
+                """,
+                ("customer@example.com", "legacy-invalid-hash", "2026-10-16T00:00:00+00:00"),
+            )
+            connection.commit()
+
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_EMAIL": "Felipe@example.com",
+                "OWNER_PASSWORD": "owner-password-secure",
+            },
+            clear=True,
+        ):
+            initialize_database(database_path)
+
+        with closing(connect_database(database_path)) as connection:
+            owner = connection.execute(
+                "SELECT email, password_hash, role FROM users WHERE email = ?",
+                ("felipe@example.com",),
+            ).fetchone()
+            customer = connection.execute(
+                "SELECT role FROM users WHERE email = ?",
+                ("customer@example.com",),
+            ).fetchone()
+            role_column = connection.execute(
+                "PRAGMA table_info(users)"
+            ).fetchall()
+
+        self.assertIsNotNone(owner)
+        self.assertEqual(owner["role"], "owner")
+        self.assertTrue(owner["password_hash"].startswith("pbkdf2_sha256$"))
+        self.assertEqual(customer["role"], "customer")
+        self.assertTrue(any(column["name"] == "role" for column in role_column))
+
+    def test_promoting_existing_account_revokes_its_customer_sessions(self):
+        self.register(self.opener, "felipe@example.com")
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_EMAIL": "felipe@example.com",
+                "OWNER_PASSWORD": "new-owner-password-123",
+            },
+            clear=True,
+        ):
+            initialize_database(self.database_path)
+
+        _, session = self.request(self.opener, "/api/session")
+        self.assertIsNone(session["user"])
+
+        owner_opener = self.make_opener()
+        login_status, login = self.request(
+            owner_opener,
+            "/api/login",
+            method="POST",
+            payload={
+                "email": "felipe@example.com",
+                "password": "new-owner-password-123",
+            },
+        )
+        self.assertEqual(login_status, 200)
+        self.assertEqual(login["user"]["role"], "owner")
 
     def test_database_path_can_be_configured_for_persistent_render_disk(self):
         database_path = Path(self.temp_dir.name) / "persistent" / "portfolio.sqlite3"
@@ -244,6 +332,99 @@ class PortfolioAPITests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(notification["status"], "pending")
         self.assertEqual(notification["last_error"], "EmailNotConfiguredError")
+
+    def test_owner_can_view_and_update_all_contracts_but_customers_cannot(self):
+        self.register(self.opener, "customer@example.com")
+        with self.assertLogs("root", level="ERROR"):
+            contract_status, _ = self.request(
+                self.opener,
+                "/api/contracts",
+                method="POST",
+                payload={
+                    "service_id": "custom-project",
+                    "description": "Quero um sistema para minha loja.",
+                },
+            )
+        self.assertEqual(contract_status, 201)
+
+        customer_list_status, _ = self.request(self.opener, "/api/admin/contracts")
+        anonymous_list_status, _ = self.request(
+            self.make_opener(),
+            "/api/admin/contracts",
+        )
+        customer_page_status, _ = self.request(self.opener, "/admin")
+        customer_update_status, _ = self.request(
+            self.opener,
+            "/api/admin/contracts/status",
+            method="POST",
+            payload={"contract_id": 1, "status": "Concluído"},
+        )
+        self.assertEqual(anonymous_list_status, 401)
+        self.assertEqual(customer_list_status, 403)
+        self.assertEqual(customer_page_status, 403)
+        self.assertEqual(customer_update_status, 403)
+
+        owner_opener = self.make_opener()
+        self.register(owner_opener, "owner@example.com")
+        with closing(connect_database(self.database_path)) as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE users SET role = 'owner' WHERE email = ?",
+                    ("owner@example.com",),
+                )
+
+        owner_login_opener = self.make_opener()
+        owner_login_status, owner_login = self.request(
+            owner_login_opener,
+            "/api/login",
+            method="POST",
+            payload={
+                "email": "owner@example.com",
+                "password": "strong-password-123",
+            },
+        )
+        self.assertEqual(owner_login_status, 200)
+        self.assertEqual(owner_login["user"]["role"], "owner")
+
+        _, owner_session = self.request(owner_opener, "/api/session")
+        self.assertEqual(owner_session["user"]["role"], "owner")
+        with owner_opener.open(f"{self.base_url}/admin") as owner_page:
+            self.assertEqual(owner_page.status, 200)
+        list_status, result = self.request(owner_opener, "/api/admin/contracts")
+        self.assertEqual(list_status, 200)
+        self.assertEqual(len(result["contracts"]), 1)
+        self.assertEqual(result["contracts"][0]["customer_email"], "customer@example.com")
+        self.assertEqual(
+            result["contracts"][0]["description"],
+            "Quero um sistema para minha loja.",
+        )
+
+        update_status, updated = self.request(
+            owner_opener,
+            "/api/admin/contracts/status",
+            method="POST",
+            payload={"contract_id": result["contracts"][0]["id"], "status": "Concluído"},
+        )
+        self.assertEqual(update_status, 200)
+        self.assertEqual(updated["status"], "Concluído")
+        _, customer_tasks = self.request(self.opener, "/api/tasks")
+        self.assertEqual(customer_tasks["contracts"][0]["status"], "Concluído")
+        self.assertTrue(
+            all(task["status"] == "Concluído" for task in customer_tasks["contracts"][0]["tasks"])
+        )
+
+        invalid_status, _ = self.request(
+            owner_opener,
+            "/api/admin/contracts/status",
+            method="POST",
+            payload={"contract_id": 1, "status": "Aprovado"},
+        )
+        self.assertEqual(invalid_status, 400)
+
+    def test_owner_and_customer_registration_never_self_assign_roles(self):
+        status, registered = self.register(self.opener, "owner@example.com")
+        self.assertEqual(status, 201)
+        self.assertEqual(registered["user"]["role"], "customer")
 
     def test_project_request_email_uses_fixed_recipient_and_customer_reply_to(self):
         self.register(self.opener, "client@example.com")

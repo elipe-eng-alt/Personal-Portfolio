@@ -18,6 +18,7 @@
 				<a href="/dashboard" data-route>Dashboard</a>
 				<a href="/services" data-route>Serviços</a>
 				<a href="/tasks" data-route>Tarefas</a>
+				<a id="admin-link" href="/admin" data-route hidden>Gestão</a>
 			</nav>
 			<div class="account-area">
 				<span id="account-email" class="account-email" hidden></span>
@@ -140,7 +141,21 @@
 				<div class="eyebrow">Catálogo</div>
 				<h1 class="page-title">Serviços para contratar</h1>
 				<p class="muted">Escolha um serviço e envie uma solicitação. Seu e-mail e os detalhes escritos serão salvos e enviados ao responsável pelo portfólio. O envio não processa pagamentos.</p>
+				<a id="owner-services-card" class="owner-services-card" href="/admin" data-route hidden>
+					<span class="category">Área do responsável</span>
+					<strong>Gestão de solicitações</strong>
+					<span>Consulte clientes, leia as ideias enviadas e atualize o andamento dos projetos.</span>
+				</a>
 				<div id="service-catalog" class="offer-grid"></div>
+			</div>
+		</section>
+
+		<section class="page" data-page="admin" hidden>
+			<div class="wrap page-content">
+				<div class="eyebrow">Área privada do responsável</div>
+				<h1 class="page-title">Gestão de solicitações</h1>
+				<p class="muted">Veja os clientes e as ideias enviadas, atualize o andamento e marque os projetos concluídos ou cancelados.</p>
+				<div id="admin-contracts-list" class="record-list"></div>
 			</div>
 		</section>
 
