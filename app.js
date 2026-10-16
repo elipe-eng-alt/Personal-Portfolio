@@ -493,7 +493,13 @@ async function loadAdminContracts() {
 		renderAdminContracts(result.contracts);
 	} catch (error) {
 		container.replaceChildren(makeElement("p", "empty-state", error.message));
-		if (error.status === 401 || error.status === 403) {
+		if (error.status === 401) {
+			pendingPath = "/admin";
+			currentUser = null;
+			updateAccountControls();
+			await navigate("/login");
+			setGlobalStatus("Sua sessão do responsável expirou. Entre novamente para continuar.");
+		} else if (error.status === 403) {
 			await navigate("/", true);
 			setGlobalStatus("Esta área é restrita ao responsável pelo projeto.");
 		}
@@ -519,9 +525,22 @@ document.addEventListener("submit", async (event) => {
 			await loadAdminContracts();
 			setGlobalStatus("Status da solicitação atualizado.");
 		} catch (error) {
-			message.textContent = error.message;
+			if (error.status === 401) {
+				pendingPath = "/admin";
+				currentUser = null;
+				updateAccountControls();
+				await navigate("/login");
+				setGlobalStatus("Sua sessão do responsável expirou. Entre novamente e atualize o status.");
+			} else if (error.status === 403) {
+				await navigate("/", true);
+				setGlobalStatus("Esta área é restrita ao responsável pelo projeto.");
+			} else {
+				message.textContent = error.message;
+			}
 		} finally {
-			button.disabled = false;
+			if (button.isConnected) {
+				button.disabled = false;
+			}
 		}
 		return;
 	}

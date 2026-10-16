@@ -47,13 +47,15 @@ No serviço Railway que publica este site, configure em **Variables**:
 
 O backend usa a porta fornecida pelo Railway (`PORT`) e escuta em `0.0.0.0`. No Railway, a origem permitida fica fixa em `https://personal-portfolio-production-b12c.up.railway.app`; outras origens, inclusive o domínio antigo do Render, são recusadas nas operações de escrita. Configure também `APP_ORIGIN` com esse valor no painel e faça redeploy após salvar as variáveis. Para verificar o serviço, abra `https://personal-portfolio-production-b12c.up.railway.app/api/health`: `database` deve ser `ok` e `email_provider` deve indicar o provedor configurado.
 
-O SQLite no sistema de arquivos efêmero do serviço não garante persistência entre deploys. Para preservar cadastros, adicione um Volume Railway e configure `DATABASE_PATH` para um arquivo dentro do caminho montado, como `/data/portfolio.sqlite3`.
+O SQLite no sistema de arquivos efêmero do serviço não garante persistência entre deploys. Para preservar cadastros e sessões, adicione um Volume Railway, monte-o em `/data` e configure `DATABASE_PATH=/data/portfolio.sqlite3`. Como esse SQLite local não é compartilhado entre réplicas, mantenha o serviço com **uma réplica**; para escalar horizontalmente, migre para PostgreSQL ou outro banco compartilhado.
 
 ### Painel privado do responsável
 
 Defina `OWNER_EMAIL` e `OWNER_PASSWORD` nas variáveis do Railway e faça redeploy. Na inicialização, o sistema cria ou promove somente essa conta configurada para o papel `owner`, com a senha armazenada em hash; usuários comuns não conseguem obter esse papel pelo formulário de cadastro. Entre com essas credenciais: o painel privado abre após o login e o link de gestão aparece para o owner. Nele é possível consultar todas as solicitações, clientes e descrições, além de atualizar cada solicitação para **Solicitado**, **Em andamento**, **Concluído** ou **Cancelado**.
 
 As rotas administrativas conferem o papel no backend em cada requisição. Ocultar o link para clientes comuns é apenas um ajuste visual; o bloqueio efetivo da listagem e das alterações é feito no servidor. Não use nem reutilize uma senha compartilhada anteriormente; configure uma nova senha forte somente no segredo `OWNER_PASSWORD`.
+
+Se a gestão mostrar que você precisa entrar novamente ao salvar um status, faça login novamente como owner. Se o erro persistir após novo login, confirme que o Railway está com uma réplica e que o Volume está montado no caminho usado por `DATABASE_PATH`; sem isso, diferentes instâncias ou reinicializações podem não encontrar a sessão usada no login.
 
 ### Configurar o serviço no Render
 
